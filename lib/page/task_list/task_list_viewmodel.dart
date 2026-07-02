@@ -355,24 +355,78 @@ class TaskListViewModel extends FutureViewModel {
     }
   }
 
-  /// POST /api/mobile/getDataProcess
-  /// Ambil data process berdasarkan FOPNumber
-  /// Response berupa flat List yang berisi 3 tipe record:
-  /// - FOP Header (ada FOPDate/SONumber/Description, tidak ada BOMCode)
-  /// - BOM (ada BOMCode + BOMName + QTY + Category, tidak ada ProcessCode)
-  /// - Process (ada BOMCode + ProcessCode + ProcessName)
-  Future<void> getDataProcess({String? fopNumber}) async {
-    final fop = fopNumber ?? fopPlanning.text.trim();
-    if (fop.isEmpty) {
-      debugPrint('getDataProcess error: FOPNumber kosong');
-      return;
+  /// Group flat rows: FOPNumber → BOMCode → ProcessList
+  List<Map<String, dynamic>> _parseGroupedFopList(
+    List<Map<String, dynamic>> allItems,
+  ) {
+    final fopOrder = <String>[];
+    final fopHeaders = <String, Map<String, dynamic>>{};
+    final bomOrder = <String, List<String>>{};
+    final bomData = <String, Map<String, Map<String, dynamic>>>{};
+
+    for (final item in allItems) {
+      final fopNum = item['FOPNumber']?.toString().trim() ?? '';
+      final bomCode = item['BOMCode']?.toString().trim() ?? '';
+      if (fopNum.isEmpty) continue;
+
+      if (!fopHeaders.containsKey(fopNum)) {
+        fopOrder.add(fopNum);
+        fopHeaders[fopNum] = {
+          'FOPNumber': fopNum,
+          'FOPDate': item['FOPDate'],
+          'SONumber': item['SONumber'],
+          'Description': item['Description'],
+        };
+        bomOrder[fopNum] = [];
+        bomData[fopNum] = {};
+      }
+
+      if (bomCode.isEmpty) continue;
+
+      if (!bomData[fopNum]!.containsKey(bomCode)) {
+        bomOrder[fopNum]!.add(bomCode);
+        bomData[fopNum]![bomCode] = {
+          'FOPNumber': fopNum,
+          'BOMCode': bomCode,
+          'BOMName': item['BOMName'],
+          'QTY': item['QTY'],
+          'Category': item['Category'],
+          'ProcessList': <Map<String, dynamic>>[],
+        };
+      }
+
+      final processCode = item['ProcessCode']?.toString().trim() ?? '';
+      if (processCode.isEmpty) continue;
+
+      final processes =
+          bomData[fopNum]![bomCode]!['ProcessList'] as List<Map<String, dynamic>>;
+      final exists = processes.any(
+        (p) => p['ProcessCode']?.toString() == processCode,
+      );
+      if (!exists) {
+        processes.add({
+          'FOPNumber': fopNum,
+          'BOMCode': bomCode,
+          'ProcessCode': item['ProcessCode'],
+          'ProcessName': item['ProcessName'],
+        });
+      }
     }
 
+    return fopOrder.map((fopNum) {
+      final boms = bomOrder[fopNum]!
+          .map((bomCode) => bomData[fopNum]![bomCode]!)
+          .toList();
+      return {...fopHeaders[fopNum]!, 'BOMList': boms};
+    }).toList();
+  }
+
+  /// GET /api/mobile/getDataAllFOP
+  /// Response flat: setiap baris = FOP + BOM + Process
+  Future<void> getDataProcess() async {
     setBusy(true);
     try {
-      final decoded = await _apiServices.postRaw('/getDataProcess', {
-        'FOPNumber': fop,
-      });
+      final decoded = await _apiServices.getRaw('/getDataAllFOP');
 
       List<dynamic> rawList = [];
       if (decoded is List) {
@@ -381,65 +435,20 @@ class TaskListViewModel extends FutureViewModel {
         rawList = decoded['data'] as List;
       }
 
-      // Parse flat list → struktur hierarki
       final allItems = rawList
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
 
-      // Pisahkan berdasarkan tipe record
-      final fopHeaders = allItems
-          .where(
-            (e) =>
-                e['FOPDate'] != null ||
-                e['SONumber'] != null ||
-                e['Description'] != null,
-          )
-          .toList();
-
-      final bomItems = allItems
-          .where(
-            (e) =>
-                e['BOMCode'] != null &&
-                e['BOMName'] != null &&
-                e['ProcessCode'] == null,
-          )
-          .toList();
-
-      final processItems = allItems
-          .where((e) => e['BOMCode'] != null && e['ProcessCode'] != null)
-          .toList();
-
-      // Bangun struktur: 1 FOP header → banyak BOM → setiap BOM punya list Process
-      fopList = fopHeaders.map((header) {
-        final fopNum = header['FOPNumber']?.toString() ?? '';
-
-        // BOM untuk FOP ini
-        final boms = bomItems
-            .where((b) => b['FOPNumber']?.toString() == fopNum)
-            .map((bom) {
-              final bomCode = bom['BOMCode']?.toString() ?? '';
-              // Process untuk BOM ini
-              final processes = processItems
-                  .where(
-                    (p) =>
-                        p['FOPNumber']?.toString() == fopNum &&
-                        p['BOMCode']?.toString() == bomCode,
-                  )
-                  .toList();
-              return {...bom, 'ProcessList': processes};
-            })
-            .toList();
-
-        return {...header, 'BOMList': boms};
-      }).toList();
-
-      // Simpan ke _rawFopList, lalu apply filter
+      fopList = _parseGroupedFopList(allItems);
       _rawFopList = List.from(fopList);
       _applyFilter();
 
+      final bomCount = fopList.fold<int>(
+        0,
+        (sum, fop) => sum + ((fop['BOMList'] as List?)?.length ?? 0),
+      );
       debugPrint(
-        'getDataProcess: ${_rawFopList.length} FOP, '
-        '${bomItems.length} BOM, ${processItems.length} Process',
+        'getDataProcess: ${fopList.length} FOP, $bomCount BOM',
       );
       notifyListeners();
     } catch (e) {
@@ -677,5 +686,7 @@ class TaskListViewModel extends FutureViewModel {
   }
 
   @override
-  Future<void> futureToRun() async {}
+  Future<void> futureToRun() async {
+    await getDataProcess();
+  }
 }

@@ -1,10 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-
-/// Card utama untuk menampilkan data FOP 3 level:
-/// Level 1 - Info FOP (FOPNumber, FOPDate, SONumber, Description)
-/// Level 2 - List BOM yang bisa di-expand (BOMCode, BOMName, QTY, Category)
-/// Level 3 - Process tracking per BOMCode (ProcessCode, ProcessName)
+import 'package:intl/intl.dart';
 
 class FopCard extends StatefulWidget {
   final Map<String, dynamic> fopData;
@@ -16,28 +12,25 @@ class FopCard extends StatefulWidget {
 }
 
 class _FopCardState extends State<FopCard> {
-  // Set of expanded BOMCode
+  bool _isFopExpanded = false;
   final Set<String> _expandedBoms = {};
 
   List<Map<String, dynamic>> get _bomList {
-    print("widget.fopData : ${widget.fopData}");
     final raw = widget.fopData['BOMList'];
-    print("_bomList : ${raw}");
     if (raw is List) {
-      return raw.map((e) => Map<String, dynamic>.from(e)).toList();
+      return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
 
   List<Map<String, dynamic>> _processesForBom(String bomCode) {
-    // ProcessList sudah di-embed dalam setiap BOM item saat parsing di viewmodel
     final bom = _bomList.firstWhere(
       (b) => b['BOMCode']?.toString() == bomCode,
       orElse: () => {},
     );
     final raw = bom['ProcessList'];
     if (raw is List) {
-      return raw.map((e) => Map<String, dynamic>.from(e)).toList();
+      return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
@@ -46,16 +39,21 @@ class _FopCardState extends State<FopCard> {
   Widget build(BuildContext context) {
     final fop = widget.fopData;
     final fopNumber = _val(fop, ['FOPNumber', 'FOPNo', 'FopNumber']) ?? '-';
-    final fopDate = _val(fop, ['FOPDate', 'FopDate', 'Date']) ?? '-';
+    final fopDate = _formatDate(_val(fop, ['FOPDate', 'FopDate', 'Date']));
     final soNumber = _val(fop, ['SONumber', 'SoNumber', 'SONo']) ?? '-';
     final description = _val(fop, ['Description', 'Desc', 'Notes']) ?? '-';
+    final bomCount = _bomList.length;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFFE5EAF3)),
+        border: Border.all(
+          color: _isFopExpanded
+              ? const Color(0xFF7C3AED).withValues(alpha: 0.35)
+              : const Color(0xFFE5EAF3),
+        ),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.045),
@@ -67,25 +65,43 @@ class _FopCardState extends State<FopCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Level 1: Header FOP ──────────────────────────────
-          _buildFopHeader(fopNumber, fopDate, soNumber, description),
-
-          if (_bomList.isNotEmpty) ...[
-            const Divider(height: 1, color: Color(0xFFE5EAF3)),
-            // ── Level 2: List BOM expandable ────────────────────
-            ..._bomList.map((bom) => _buildBomRow(bom)),
-          ],
+          InkWell(
+            onTap: () => setState(() => _isFopExpanded = !_isFopExpanded),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            child: _buildFopHeader(
+              fopNumber,
+              fopDate,
+              soNumber,
+              description,
+              bomCount,
+            ),
+          ),
+          AnimatedCrossFade(
+            firstChild: const SizedBox.shrink(),
+            secondChild: _bomList.isEmpty
+                ? _buildEmptyBom()
+                : Column(
+                    children: [
+                      const Divider(height: 1, color: Color(0xFFE5EAF3)),
+                      ..._bomList.map((bom) => _buildBomRow(bom)),
+                    ],
+                  ),
+            crossFadeState: _isFopExpanded
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            duration: const Duration(milliseconds: 250),
+          ),
         ],
       ),
     );
   }
 
-  // ── Level 1 ───────────────────────────────────────────────────
   Widget _buildFopHeader(
     String fopNumber,
     String fopDate,
     String soNumber,
     String description,
+    int bomCount,
   ) {
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -110,7 +126,6 @@ class _FopCardState extends State<FopCard> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // FOP Number — judul utama
                 Text(
                   fopNumber,
                   style: GoogleFonts.poppins(
@@ -129,18 +144,24 @@ class _FopCardState extends State<FopCard> {
                       fopDate,
                       const Color(0xFF2563EB),
                     ),
+                    if (soNumber != '-')
+                      _chip(
+                        Icons.receipt_long_rounded,
+                        soNumber,
+                        const Color(0xFF059669),
+                      ),
                     _chip(
-                      Icons.receipt_long_rounded,
-                      soNumber,
-                      const Color(0xFF059669),
+                      Icons.inventory_2_outlined,
+                      '$bomCount BOM',
+                      const Color(0xFF7C3AED),
                     ),
                   ],
                 ),
                 if (description != '-') ...[
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(
                     description,
-                    maxLines: 2,
+                    maxLines: _isFopExpanded ? 6 : 2,
                     overflow: TextOverflow.ellipsis,
                     style: GoogleFonts.poppins(
                       fontSize: 11.5,
@@ -149,7 +170,27 @@ class _FopCardState extends State<FopCard> {
                     ),
                   ),
                 ],
+                if (!_isFopExpanded) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Ketuk untuk lihat detail BOM & proses',
+                    style: GoogleFonts.poppins(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: const Color(0xFF2563EB),
+                    ),
+                  ),
+                ],
               ],
+            ),
+          ),
+          AnimatedRotation(
+            turns: _isFopExpanded ? 0.5 : 0,
+            duration: const Duration(milliseconds: 200),
+            child: const Icon(
+              Icons.keyboard_arrow_down_rounded,
+              color: Color(0xFF667085),
+              size: 26,
             ),
           ),
         ],
@@ -157,7 +198,19 @@ class _FopCardState extends State<FopCard> {
     );
   }
 
-  // ── Level 2: BOM row expandable ──────────────────────────────
+  Widget _buildEmptyBom() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Text(
+        'Tidak ada data BOM',
+        style: GoogleFonts.poppins(
+          fontSize: 12,
+          color: const Color(0xFF667085),
+        ),
+      ),
+    );
+  }
+
   Widget _buildBomRow(Map<String, dynamic> bom) {
     final bomCode = _val(bom, ['BOMCode']) ?? '-';
     final bomName = _val(bom, ['BOMName']) ?? '-';
@@ -168,7 +221,6 @@ class _FopCardState extends State<FopCard> {
 
     return Column(
       children: [
-        // Row BOM — klik untuk expand/collapse
         InkWell(
           onTap: () {
             setState(() {
@@ -183,7 +235,6 @@ class _FopCardState extends State<FopCard> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                // Indent marker
                 Container(
                   width: 3,
                   height: 70,
@@ -199,16 +250,13 @@ class _FopCardState extends State<FopCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Baris atas: BOMCode + BOMName
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 8,
                           vertical: 4,
                         ),
                         decoration: BoxDecoration(
-                          color: const Color(
-                            0xFF2563EB,
-                          ).withValues(alpha: 0.08),
+                          color: const Color(0xFF2563EB).withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
@@ -232,7 +280,6 @@ class _FopCardState extends State<FopCard> {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      // Baris bawah: QTY + Category
                       Row(
                         children: [
                           Container(
@@ -241,9 +288,7 @@ class _FopCardState extends State<FopCard> {
                               vertical: 2,
                             ),
                             decoration: BoxDecoration(
-                              color: const Color(
-                                0xFF059669,
-                              ).withValues(alpha: 0.1),
+                              color: const Color(0xFF059669).withValues(alpha: 0.1),
                               borderRadius: BorderRadius.circular(6),
                             ),
                             child: Text(
@@ -282,13 +327,19 @@ class _FopCardState extends State<FopCard> {
                               ),
                             ),
                           ],
+                          const SizedBox(width: 6),
+                          Text(
+                            '${processes.length} proses',
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              color: const Color(0xFF667085),
+                            ),
+                          ),
                         ],
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                // Expand/collapse icon
                 AnimatedRotation(
                   turns: isExpanded ? 0.5 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -302,8 +353,6 @@ class _FopCardState extends State<FopCard> {
             ),
           ),
         ),
-
-        // ── Level 3: Process tracking (expanded) ────────────────
         AnimatedCrossFade(
           firstChild: const SizedBox.shrink(),
           secondChild: processes.isEmpty
@@ -314,13 +363,11 @@ class _FopCardState extends State<FopCard> {
               : CrossFadeState.showFirst,
           duration: const Duration(milliseconds: 250),
         ),
-
         const Divider(height: 1, color: Color(0xFFE5EAF3)),
       ],
     );
   }
 
-  // ── Level 3: Process tracking timeline ───────────────────────
   Widget _buildProcessTracking(List<Map<String, dynamic>> processes) {
     return Container(
       margin: const EdgeInsets.fromLTRB(31, 0, 16, 12),
@@ -334,7 +381,7 @@ class _FopCardState extends State<FopCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Process Tracking',
+            'Antrean Proses',
             style: GoogleFonts.poppins(
               fontSize: 11,
               fontWeight: FontWeight.w700,
@@ -342,129 +389,184 @@ class _FopCardState extends State<FopCard> {
               letterSpacing: 0.5,
             ),
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: List.generate(processes.length, (index) {
-              final p = processes[index];
-              final processCode = _val(p, ['ProcessCode']) ?? '-';
-              final processName = _val(p, ['ProcessName']) ?? '-';
-              final statusRaw = _val(p, ['Status', 'ProcessStatus', 'IsDone']);
-              final isDone =
-                  statusRaw == '1' ||
-                  statusRaw == 'true' ||
-                  statusRaw == 'Done' ||
-                  statusRaw == 'Selesai';
-              final isRunning = !isDone && index == _firstNotDone(processes);
+          const SizedBox(height: 12),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: List.generate(processes.length, (index) {
+                final p = processes[index];
+                final processCode = _val(p, ['ProcessCode']) ?? '-';
+                final processName = _val(p, ['ProcessName']) ?? '-';
+                final statusRaw = _val(p, [
+                  'Status',
+                  'ProcessStatus',
+                  'IsDone',
+                ]);
+                final isDone =
+                    statusRaw == '1' ||
+                    statusRaw == 'true' ||
+                    statusRaw == 'Done' ||
+                    statusRaw == 'Selesai';
+                final activeIndex = _firstNotDone(processes);
+                final isActive = !isDone && index == activeIndex;
+                final isWaiting = !isDone && index > activeIndex;
 
-              final color = isDone
-                  ? const Color(0xFF16A34A)
-                  : isRunning
-                  ? const Color(0xFF2563EB)
-                  : const Color(0xFFCBD5E1);
+                final color = isDone
+                    ? const Color(0xFF16A34A)
+                    : isActive
+                    ? const Color(0xFF2563EB)
+                    : const Color(0xFFCBD5E1);
 
-              return Expanded(
-                child: Column(
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Connector + circle
-                    Row(
-                      children: [
-                        if (index > 0)
-                          Expanded(
-                            child: Container(
+                    SizedBox(
+                      width: 88,
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                              boxShadow: isActive
+                                  ? [
+                                      BoxShadow(
+                                        color: const Color(
+                                          0xFF2563EB,
+                                        ).withValues(alpha: 0.35),
+                                        blurRadius: 8,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: Center(
+                              child: isDone
+                                  ? const Icon(
+                                      Icons.check_rounded,
+                                      color: Colors.white,
+                                      size: 16,
+                                    )
+                                  : Text(
+                                      '${index + 1}',
+                                      style: GoogleFonts.poppins(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            processCode,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF344054),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            processName,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.poppins(
+                              fontSize: 9.5,
+                              height: 1.25,
+                              color: isWaiting
+                                  ? const Color(0xFF94A3B8)
+                                  : color,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (isActive) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(
+                                  0xFF2563EB,
+                                ).withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                'Berjalan',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 8.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: const Color(0xFF2563EB),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (index < processes.length - 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 13),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 18,
                               height: 2,
-                              color: index <= _firstNotDone(processes)
+                              color: index < activeIndex
                                   ? const Color(0xFF16A34A)
                                   : const Color(0xFFE2E8F0),
                             ),
-                          ),
-                        Container(
-                          width: 22,
-                          height: 22,
-                          decoration: BoxDecoration(
-                            color: color,
-                            shape: BoxShape.circle,
-                            boxShadow: isRunning
-                                ? [
-                                    BoxShadow(
-                                      color: const Color(
-                                        0xFF2563EB,
-                                      ).withValues(alpha: 0.35),
-                                      blurRadius: 6,
-                                      spreadRadius: 1,
-                                    ),
-                                  ]
-                                : null,
-                          ),
-                          child: Center(
-                            child: isDone
-                                ? const Icon(
-                                    Icons.check_rounded,
-                                    color: Colors.white,
-                                    size: 13,
-                                  )
-                                : isRunning
-                                ? Container(
-                                    width: 8,
-                                    height: 8,
-                                    decoration: const BoxDecoration(
-                                      color: Colors.white,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  )
-                                : Text(
-                                    '${index + 1}',
-                                    style: GoogleFonts.poppins(
-                                      color: Colors.white,
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                          ),
+                            Icon(
+                              Icons.chevron_right_rounded,
+                              size: 16,
+                              color: index < activeIndex
+                                  ? const Color(0xFF16A34A)
+                                  : const Color(0xFFCBD5E1),
+                            ),
+                            Container(
+                              width: 18,
+                              height: 2,
+                              color: index < activeIndex
+                                  ? const Color(0xFF16A34A)
+                                  : const Color(0xFFE2E8F0),
+                            ),
+                          ],
                         ),
-                        if (index < processes.length - 1)
-                          Expanded(
-                            child: Container(
-                              height: 2,
-                              color: index < _firstNotDone(processes)
-                                  ? const Color(0xFF16A34A)
-                                  : const Color(0xFFE2E8F0),
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 5),
-                    // Process code
-                    Text(
-                      processCode,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.poppins(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w800,
-                        color: const Color(0xFF344054),
                       ),
-                    ),
-                    // Process name
-                    Text(
-                      processName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.poppins(
-                        fontSize: 8.5,
-                        color: color,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
                   ],
-                ),
-              );
-            }),
+                );
+              }),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  int _firstNotDone(List<Map<String, dynamic>> processes) {
+    for (int i = 0; i < processes.length; i++) {
+      final statusRaw = _val(processes[i], [
+        'Status',
+        'ProcessStatus',
+        'IsDone',
+      ]);
+      final isDone =
+          statusRaw == '1' ||
+          statusRaw == 'true' ||
+          statusRaw == 'Done' ||
+          statusRaw == 'Selesai';
+      if (!isDone) return i;
+    }
+    return processes.length;
   }
 
   Widget _buildNoProcess() {
@@ -498,40 +600,36 @@ class _FopCardState extends State<FopCard> {
     );
   }
 
-  // ── Helpers ──────────────────────────────────────────────────
   Widget _chip(IconData icon, String value, Color color) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 4),
-        Text(
-          value,
-          style: GoogleFonts.poppins(
-            fontSize: 11.5,
-            color: color,
-            fontWeight: FontWeight.w600,
+        Flexible(
+          child: Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.poppins(
+              fontSize: 11.5,
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ],
     );
   }
 
-  int _firstNotDone(List<Map<String, dynamic>> processes) {
-    for (int i = 0; i < processes.length; i++) {
-      final statusRaw = _val(processes[i], [
-        'Status',
-        'ProcessStatus',
-        'IsDone',
-      ]);
-      final isDone =
-          statusRaw == '1' ||
-          statusRaw == 'true' ||
-          statusRaw == 'Done' ||
-          statusRaw == 'Selesai';
-      if (!isDone) return i;
+  String _formatDate(String? raw) {
+    if (raw == null || raw == '-') return '-';
+    try {
+      final dt = DateTime.parse(raw);
+      return DateFormat('dd MMM yyyy').format(dt.toLocal());
+    } catch (_) {
+      return raw;
     }
-    return processes.length;
   }
 
   String? _val(Map<String, dynamic> map, List<String> keys) {

@@ -35,6 +35,22 @@ class ApiServices {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  /// GET request — return dynamic (List atau Map)
+  Future<dynamic> getRaw(
+    String url, {
+    Map<String, String>? queryParameters,
+  }) async {
+    final uri = Uri.parse('$baseUrl$url').replace(
+      queryParameters: queryParameters,
+    );
+    final response = await http.get(
+      uri,
+      headers: {'Accept': 'application/json'},
+    );
+    debugPrint('getRaw $url status: ${response.statusCode}');
+    return jsonDecode(response.body);
+  }
+
   /// Sama seperti [post] tapi return dynamic — untuk endpoint yang return List
   Future<dynamic> postRaw(String url, dynamic body) async {
     if (body is List && body.isEmpty) {

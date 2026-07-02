@@ -1,13 +1,20 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:kms_monitoring_iot/core/app_globals.dart';
+import 'package:kms_monitoring_iot/page/connect/connect_viewmodel.dart';
 import 'package:kms_monitoring_iot/service/api_services.dart';
 import 'package:stacked/stacked.dart';
 
 class HistoryViewModel extends FutureViewModel {
+  final ApiServices _apiServices = ApiServices();
+  String? _baseUrl;
+  String? errorMessage;
+
   List<Map<String, dynamic>> _rawFopList = [];
   List<Map<String, dynamic>> fopList = [];
 
-  // ── Search ───────────────────────────────────────────────────
   String _searchQuery = '';
   String get searchQuery => _searchQuery;
 
@@ -67,17 +74,15 @@ class HistoryViewModel extends FutureViewModel {
   void _applyFilter() {
     var filtered = _rawFopList;
 
-    // Search text
     if (_searchQuery.isNotEmpty) {
       filtered = filtered.where((fop) {
-        // Cocokkan di semua field header FOP
         final headerMatch = fop.entries
             .where((e) => e.key != 'BOMList')
             .any(
               (e) => e.value.toString().toLowerCase().contains(_searchQuery),
             );
         if (headerMatch) return true;
-        // Cocokkan di BOM / Process
+
         final boms = fop['BOMList'] as List? ?? [];
         return boms.any((bom) {
           final b = bom as Map;
@@ -96,7 +101,6 @@ class HistoryViewModel extends FutureViewModel {
       }).toList();
     }
 
-    // Filter kategori / process
     if (selectedCategory != null || selectedProcessName != null) {
       filtered = filtered
           .map((fop) {
@@ -113,8 +117,9 @@ class HistoryViewModel extends FutureViewModel {
                       (p) =>
                           (p as Map)['ProcessName']?.toString() ==
                           selectedProcessName,
-                    ))
+                    )) {
                       return false;
+                    }
                   }
                   return true;
                 })
@@ -128,158 +133,210 @@ class HistoryViewModel extends FutureViewModel {
     fopList = filtered;
   }
 
+  Future<String?> _getBaseUrl() async {
+    if (_baseUrl != null) return _baseUrl;
+
+    final savedIp = await ConnectViewModel.getSavedIp();
+    if (savedIp == null || savedIp.trim().isEmpty) return null;
+
+    _baseUrl = _normalizeBaseUrl(savedIp);
+    return _baseUrl;
+  }
+
+  String _normalizeBaseUrl(String value) {
+    var url = value.trim();
+    if (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    if (url.contains(':')) {
+      return 'http://$url';
+    }
+    return 'http://$url:1346';
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchCountingFinish() async {
+    final baseUrl = await _getBaseUrl();
+    if (baseUrl == null) {
+      errorMessage = 'IP server belum tersimpan';
+      return [];
+    }
+
+    final uri = Uri.parse('$baseUrl/ApiKMS/api/getCountingFinish').replace(
+      queryParameters: {'AccountID': AppGlobals.accountID},
+    );
+
+    debugPrint('fetchHistory getCountingFinish: $uri');
+
+    final response = await http
+        .get(uri, headers: {'Content-Type': 'application/json'})
+        .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('getCountingFinish gagal (${response.statusCode})');
+    }
+
+    return _extractList(response.body);
+  }
+
+  List<String> _extractFopNumbers(List<Map<String, dynamic>> finishItems) {
+    final fops = <String>{};
+    for (final item in finishItems) {
+      final raw =
+          item['RefNumber'] ?? item['FOPNumber'] ?? item['FopNumber'];
+      final fop = raw?.toString().trim() ?? '';
+      if (fop.isNotEmpty) fops.add(fop);
+    }
+    return fops.toList()..sort();
+  }
+
+  List<Map<String, dynamic>> _extractList(String body) {
+    if (body.trim().isEmpty) return [];
+
+    final decoded = jsonDecode(body);
+    if (decoded is List) {
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    }
+
+    if (decoded is Map) {
+      final data = decoded['data'] ?? decoded['Data'] ?? decoded['result'];
+      if (data is List) {
+        return data
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+    }
+
+    return [];
+  }
+
+  List<Map<String, dynamic>> _parseGroupedFopList(
+    List<Map<String, dynamic>> allItems,
+  ) {
+    final fopOrder = <String>[];
+    final fopHeaders = <String, Map<String, dynamic>>{};
+    final bomOrder = <String, List<String>>{};
+    final bomData = <String, Map<String, Map<String, dynamic>>>{};
+
+    for (final item in allItems) {
+      final fopNum = item['FOPNumber']?.toString().trim() ?? '';
+      final bomCode = item['BOMCode']?.toString().trim() ?? '';
+      if (fopNum.isEmpty) continue;
+
+      if (!fopHeaders.containsKey(fopNum)) {
+        fopOrder.add(fopNum);
+        fopHeaders[fopNum] = {
+          'FOPNumber': fopNum,
+          'FOPDate': item['FOPDate'],
+          'SONumber': item['SONumber'],
+          'Description': item['Description'],
+        };
+        bomOrder[fopNum] = [];
+        bomData[fopNum] = {};
+      }
+
+      if (bomCode.isEmpty) continue;
+
+      if (!bomData[fopNum]!.containsKey(bomCode)) {
+        bomOrder[fopNum]!.add(bomCode);
+        bomData[fopNum]![bomCode] = {
+          'FOPNumber': fopNum,
+          'BOMCode': bomCode,
+          'BOMName': item['BOMName'],
+          'QTY': item['QTY'],
+          'Category': item['Category'],
+          'ProcessList': <Map<String, dynamic>>[],
+        };
+      }
+
+      final processCode = item['ProcessCode']?.toString().trim() ?? '';
+      if (processCode.isEmpty) continue;
+
+      final processes =
+          bomData[fopNum]![bomCode]!['ProcessList'] as List<Map<String, dynamic>>;
+      final exists = processes.any(
+        (p) => p['ProcessCode']?.toString() == processCode,
+      );
+      if (!exists) {
+        processes.add({
+          'FOPNumber': fopNum,
+          'BOMCode': bomCode,
+          'ProcessCode': item['ProcessCode'],
+          'ProcessName': item['ProcessName'],
+        });
+      }
+    }
+
+    return fopOrder.map((fopNum) {
+      final boms = bomOrder[fopNum]!
+          .map((bomCode) => bomData[fopNum]![bomCode]!)
+          .toList();
+      return {...fopHeaders[fopNum]!, 'BOMList': boms};
+    }).toList();
+  }
+
   Future<void> fetchHistory() async {
     setBusy(true);
-    try {
-      // Gunakan POST /getDataHistoryProcess sama seperti getDataProcess di task_list
-      // tapi tanpa filter FOPNumber agar return semua history
-      final apiServices = ApiServices();
-      final decoded = await apiServices.postRaw('/getDataHistoryProcess', []);
+    errorMessage = null;
 
-      debugPrint('fetchHistory decoded type: ${decoded.runtimeType}');
+    try {
+      final finishItems = await _fetchCountingFinish();
+      final fopNumbers = _extractFopNumbers(finishItems);
+
+      debugPrint(
+        'fetchHistory: ${finishItems.length} finish, '
+        '${fopNumbers.length} FOP unik',
+      );
+
+      if (fopNumbers.isEmpty) {
+        _rawFopList = [];
+        fopList = [];
+        notifyListeners();
+        return;
+      }
+
+      final decoded = await _apiServices.postRaw(
+        '/getDataHistoryProcess',
+        {'FOPNumber': fopNumbers},
+      );
 
       List<dynamic> rawList = [];
       if (decoded is List) {
         rawList = decoded;
       } else if (decoded is Map && decoded['data'] is List) {
-        rawList = decoded['data'] as List<dynamic>;
+        rawList = decoded['data'] as List;
       }
 
-      if (rawList.isNotEmpty) {
-        _buildStructure(rawList);
-        _applyFilter();
-        notifyListeners();
-        return;
-      }
+      final allItems = rawList
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
 
-      _loadFromFinishList();
+      _rawFopList = _parseGroupedFopList(allItems);
+      _rawFopList.sort((a, b) {
+        final na = a['FOPNumber']?.toString() ?? '';
+        final nb = b['FOPNumber']?.toString() ?? '';
+        return nb.compareTo(na);
+      });
+
+      _applyFilter();
+      notifyListeners();
+
+      debugPrint('fetchHistory: ${_rawFopList.length} FOP history loaded');
     } catch (e) {
+      errorMessage = 'Gagal memuat history';
       debugPrint('fetchHistory error: $e');
-      _loadFromFinishList();
+      _rawFopList = [];
+      fopList = [];
+      notifyListeners();
     } finally {
       setBusy(false);
     }
-  }
-
-  void _buildStructure(List<dynamic> rawList) {
-    final allItems = rawList
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList();
-
-    // Pisah berdasarkan field yang ada:
-    // Process  → punya ProcessCode
-    // BOM      → punya BOMCode, tidak punya ProcessCode
-    // FOP hdr  → tidak punya BOMCode dan tidak punya ProcessCode
-    final processItems = allItems
-        .where((e) => e['ProcessCode'] != null)
-        .toList();
-
-    final bomItems = allItems
-        .where((e) => e['BOMCode'] != null && e['ProcessCode'] == null)
-        .toList();
-
-    final fopHeaders = allItems
-        .where((e) => e['BOMCode'] == null && e['ProcessCode'] == null)
-        .toList();
-
-    debugPrint(
-      'Raw: ${fopHeaders.length} FOP, '
-      '${bomItems.length} BOM, ${processItems.length} Process',
-    );
-
-    // Debug: cek sample FOPNumber dari masing-masing grup
-    if (fopHeaders.isNotEmpty) {
-      debugPrint(
-        'FOP sample FOPNumbers: ${fopHeaders.take(3).map((e) => e['FOPNumber']).toList()}',
-      );
-    }
-    if (bomItems.isNotEmpty) {
-      debugPrint(
-        'BOM sample FOPNumbers: ${bomItems.take(3).map((e) => e['FOPNumber']).toList()}',
-      );
-      debugPrint('BOM sample item: ${bomItems.first}');
-    }
-    if (processItems.isNotEmpty) {
-      debugPrint(
-        'Process sample FOPNumbers: ${processItems.take(3).map((e) => e['FOPNumber']).toList()}',
-      );
-    }
-
-    // Kumpulkan semua FOPNumber unik dari BOM dan Process saja
-    // (karena periode bisa berbeda dengan fopHeaders)
-    final bomFopNumbers = bomItems
-        .map((b) => b['FOPNumber']?.toString() ?? '')
-        .where((n) => n.isNotEmpty)
-        .toSet();
-
-    final processFopNumbers = processItems
-        .map((p) => p['FOPNumber']?.toString() ?? '')
-        .where((n) => n.isNotEmpty)
-        .toSet();
-
-    // Semua FOPNumber dari ketiga grup
-    final allFopNumbers = <String>{
-      ...fopHeaders
-          .map((h) => h['FOPNumber']?.toString() ?? '')
-          .where((n) => n.isNotEmpty),
-      ...bomFopNumbers,
-      ...processFopNumbers,
-    };
-
-    // Map FOPNumber → header
-    final headerMap = <String, Map<String, dynamic>>{};
-    for (final h in fopHeaders) {
-      final n = h['FOPNumber']?.toString() ?? '';
-      if (n.isNotEmpty) headerMap[n] = h;
-    }
-
-    // Build FOP → BOM → Process untuk SEMUA FOPNumber unik
-    final built = allFopNumbers.map((fopNum) {
-      // Pakai header dari fopHeaders jika ada, fallback placeholder
-      final header = headerMap[fopNum] ?? {'FOPNumber': fopNum};
-
-      final boms = bomItems
-          .where((b) => b['FOPNumber']?.toString() == fopNum)
-          .map((bom) {
-            final bomCode = bom['BOMCode']?.toString() ?? '';
-            final processes = processItems
-                .where(
-                  (p) =>
-                      p['FOPNumber']?.toString() == fopNum &&
-                      p['BOMCode']?.toString() == bomCode,
-                )
-                .toList();
-            return Map<String, dynamic>.from({
-              ...bom,
-              'ProcessList': processes,
-            });
-          })
-          .toList();
-
-      return Map<String, dynamic>.from({...header, 'BOMList': boms});
-    }).toList();
-
-    // Sort descending by FOPNumber (terbaru di atas)
-    built.sort((a, b) {
-      final na = a['FOPNumber']?.toString() ?? '';
-      final nb = b['FOPNumber']?.toString() ?? '';
-      return nb.compareTo(na);
-    });
-
-    _rawFopList = built;
-
-    debugPrint(
-      'Built: ${_rawFopList.length} FOP, '
-      'sample BOMList: ${_rawFopList.isNotEmpty ? (_rawFopList[0]['BOMList'] as List).length : 0} BOM',
-    );
-  }
-
-  void _loadFromFinishList() {
-    _rawFopList = AppGlobals.finishList.isNotEmpty
-        ? List.from(AppGlobals.finishList)
-        : [];
-    _applyFilter();
-    notifyListeners();
   }
 
   @override
