@@ -77,7 +77,7 @@ class ConnectViewModel extends BaseViewModel {
     if (baseUrl.isEmpty) return false;
 
     lastConnectionError = null;
-    final endpoints = <String>['/ApiKMS/api/status', '/ApiKMS/api/connect'];
+    final endpoints = <String>['/ApiKMS/api/status'];
 
     for (final endpoint in endpoints) {
       try {
